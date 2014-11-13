@@ -1,36 +1,7 @@
-#include <stdlib.h>
-#include <string.h>
+#include <string.h> /* memcpy */
+#include <assert.h>
 
 #include "s2tc.h"
-
-struct s2tc_s {
-    s2tc_dxt_mode_t dxt;
-    s2tc_dist_mode_t dist;
-    s2tc_malloc_t alloc;
-    s2tc_free_t dealloc;
-    size_t random;
-};
-
-void s2tc_init(s2tc_t *ctx, s2tc_dxt_mode_t dxt, s2tc_dist_mode_t dist) {
-    ctx->dxt = dxt;
-    ctx->dist = dist;
-    ctx->alloc = &malloc;
-    ctx->dealloc = &free;
-    ctx->random = 0;
-}
-
-void s2tc_set_memory_functions(s2tc_t *ctx, s2tc_malloc_t alloc, s2tc_free_t dealloc) {
-    ctx->alloc = alloc;
-    ctx->dealloc = dealloc;
-}
-
-void s2tc_set_mode_dist(s2tc_t *ctx, s2tc_dist_mode_t dist) {
-    ctx->dist = dist;
-}
-
-void s2tc_set_mode_dxt(s2tc_t *ctx, s2tc_dxt_mode_t dxt) {
-    ctx->dxt = dxt;
-}
 
 /* Min and max macros */
 #define S2TC_MIN(A, B) (((A) < (B)) ? (A) : (B))
@@ -53,16 +24,14 @@ void s2tc_set_mode_dxt(s2tc_t *ctx, s2tc_dxt_mode_t dxt) {
 /* Color distance functions */
 typedef signed char s2tc_color_t[3];
 
-static int
-color_dist_avg(s2tc_color_t a, s2tc_color_t b) {
+static int color_dist_avg(s2tc_color_t a, s2tc_color_t b) {
     int dr = a[0] - b[0];
     int dg = a[1] - b[1];
     int db = a[2] - b[2];
-    return ((dr*dr) << 2) + dg*dg + ((db*db) << 2);
+    return dr*dr + dg*dg + db*db;
 }
 
-static int
-color_dist_yuv(s2tc_color_t a, s2tc_color_t b) {
+static int color_dist_yuv(s2tc_color_t a, s2tc_color_t b) {
     int dr = a[0] - b[0];
     int dg = a[1] - b[1];
     int db = a[2] - b[2];
@@ -72,8 +41,7 @@ color_dist_yuv(s2tc_color_t a, s2tc_color_t b) {
     return ((y*y) << 1) + RSHIFT(u*u, 3) + RSHIFT(v*v, 4);
 }
 
-static int
-color_dist_rgb(s2tc_color_t a, s2tc_color_t b) {
+static int color_dist_rgb(s2tc_color_t a, s2tc_color_t b) {
     int dr = a[0] - b[0];
     int dg = a[1] - b[1];
     int db = a[2] - b[2];
@@ -83,8 +51,7 @@ color_dist_rgb(s2tc_color_t a, s2tc_color_t b) {
     return ((y*y) << 1) + RSHIFT(u*u, 3) + RSHIFT(v*v, 4);
 }
 
-static int
-color_dist_srgb(s2tc_color_t a, s2tc_color_t b) {
+static int color_dist_srgb(s2tc_color_t a, s2tc_color_t b) {
     int dr = a[0] * (int)a[0] - b[0] * (int)b[0];
     int dg = a[1] * (int)a[1] - b[1] * (int)b[1];
     int db = a[2] * (int)a[2] - b[2] * (int)b[2];
@@ -104,22 +71,18 @@ static int (*color_dist_functions[])(s2tc_color_t, s2tc_color_t) = {
     [S2TC_YUV] = &color_dist_yuv
 };
 
-static int
-color_dist(s2tc_t *ctx, s2tc_color_t a, s2tc_color_t b) {
+static int color_dist(s2tc_t *ctx, s2tc_color_t a, s2tc_color_t b) {
     return color_dist_functions[ctx->dist](a, b);
 }
 
-static int
-alpha_dist(unsigned char a, unsigned char b) {
+static int alpha_dist(unsigned char a, unsigned char b) {
     return (a - (int)b) * (a - (int)b);
 }
 
 /* Reduce colors inplace */
-static int
-reduce_colors(s2tc_t *ctx, s2tc_color_t *colors, size_t n, size_t m) {
-    int **dists = ctx->alloc(sizeof(int) * m * n);
-    if (!dists)
-        return S2TC_OOM;
+static void reduce_colors(s2tc_t *ctx, s2tc_color_t *colors, size_t n, size_t m) {
+    assert(n <= 16 && m <= 16);
+    int dists[16][16];
     size_t i = 0;
     for (; i < n; ++i) {
         dists[i][i] = 0;
@@ -150,15 +113,11 @@ reduce_colors(s2tc_t *ctx, s2tc_color_t *colors, size_t n, size_t m) {
     }
     if (besti != 0) memcpy(&colors[0], &colors[besti], sizeof(s2tc_color_t));
     if (bestj != 1) memcpy(&colors[1], &colors[bestj], sizeof(s2tc_color_t));
-    ctx->dealloc(dists);
-    return 0;
 }
 
-static int
-reduce_colors_fixpoints(s2tc_t *ctx, unsigned char *colors, size_t n, size_t m) {
-    int **dists = ctx->alloc(sizeof(int) * (m+2) * n);
-    if (!dists)
-        return S2TC_OOM;
+static void reduce_colors_alpha(unsigned char *colors, size_t n, size_t m) {
+    assert(n <= 16 && m <= 16);
+    int dists[16][16+2];
     size_t i = 0;
     for (; i < n; ++i) {
         dists[i][i] = 0;
@@ -199,16 +158,10 @@ reduce_colors_fixpoints(s2tc_t *ctx, unsigned char *colors, size_t n, size_t m) 
     }
     if (besti != 0) memcpy(&colors[0], &colors[besti], sizeof(s2tc_color_t));
     if (bestj != 1) memcpy(&colors[1], &colors[bestj], sizeof(s2tc_color_t));
-    ctx->dealloc(dists);
-    return 0;
 }
 
-int
-s2tc_encode_block(s2tc_t *ctx, unsigned char *out, const unsigned char *rgba, size_t iw, size_t w, size_t h) {
-    s2tc_color_t *colors = ctx->alloc(sizeof *colors + ctx->random);
-    if (!colors)
-        return S2TC_OOM;
-
+void s2tc_encode_block(s2tc_t *ctx, unsigned char *out, const unsigned char *rgba, size_t iw, size_t w, size_t h) {
+    s2tc_color_t colors[16];
     unsigned char alpha[16];
     size_t n = 0;
     size_t m = 0;
@@ -222,46 +175,9 @@ s2tc_encode_block(s2tc_t *ctx, unsigned char *out, const unsigned char *rgba, si
         }
     }
     m = n;
-    if (ctx->random != 0) {
-        s2tc_color_t mins;
-        s2tc_color_t maxs;
-        s2tc_color_t len;
-        unsigned char mina = (ctx->dxt == S2TC_DXT5) ? alpha[0] : 0;
-        unsigned char maxa = (ctx->dxt == S2TC_DXT5) ? alpha[0] : 0;
-        memcpy(mins, colors[0], sizeof(s2tc_color_t));
-        memcpy(maxs, colors[0], sizeof(s2tc_color_t));
-        for (size_t x = 1; x < n; ++x) {
-            for (size_t c = 0; c < 3; ++c) {
-                mins[c] = S2TC_MIN(mins[c], colors[x][c]);
-                maxs[c] = S2TC_MAX(maxs[c], colors[x][c]);
-                if (ctx->dxt == S2TC_DXT5) {
-                    mina = S2TC_MIN(mina, alpha[x]);
-                    maxa = S2TC_MAX(maxa, alpha[x]);
-                }
-            }
-        }
-        for (size_t c = 0; c < 3; ++c)
-            len[c] = maxs[c] - mins[c] + 1;
-        int lena = (ctx->dxt == S2TC_DXT5)
-            ? (maxa - (int)mina + 1) : 0;
-        for (size_t x = x; x < ctx->random; ++x, ++m) {
-            for (size_t c = 0; c < 3; ++c) {
-                colors[m][c] = mins[c] + rand() % len[c];
-                if (ctx->dxt == S2TC_DXT5)
-                    alpha[m] = mina + rand() % lena;
-            }
-        }
-    }
-    int reduce = reduce_colors(ctx, colors, n, m);
-    if (reduce) {
-        ctx->dealloc(colors);
-        return reduce;
-    }
+    reduce_colors(ctx, colors, n, m);
     if (ctx->dxt == S2TC_DXT5) {
-        if ((reduce = reduce_colors_fixpoints(ctx, alpha, n, m))) {
-            ctx->dealloc(colors);
-            return reduce;
-        }
+        reduce_colors_alpha(alpha, n, m);
         if (alpha[1] < alpha[0]) {
             alpha[2] = alpha[0];
             alpha[0] = alpha[1];
@@ -336,6 +252,4 @@ s2tc_encode_block(s2tc_t *ctx, unsigned char *out, const unsigned char *rgba, si
             }
         }
     }
-    ctx->dealloc(colors);
-    return 0;
 }
